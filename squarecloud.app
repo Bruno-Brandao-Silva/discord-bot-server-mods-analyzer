@@ -1,0 +1,4 @@
+DISPLAY_NAME=Bot None
+MAIN=bot.py
+MEMORY=100
+VERSION=recommended

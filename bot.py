@@ -2,8 +2,8 @@ import os
 import csv
 import requests
 import discord
-from discord.ext import commands, tasks
-from discord.ext.commands.context import Context
+from discord import app_commands, Interaction, TextChannel
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +13,7 @@ API_URL = os.getenv('API_URL')
 API_SERVER_ID = os.getenv('API_SERVER_ID')
 
 mods_csv = "mods.csv"
+channels_csv = "channels.csv"
 channels_ids = []
 headers = {
     'Accept': 'application/json',
@@ -20,7 +21,8 @@ headers = {
 }
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 
 def get_mods():
@@ -37,18 +39,17 @@ def get_mods():
 
 def mods_to_string(mods):
     response = ['']
-    for mod in mods:
-        if len(response[-1]) + len(mod) + 1 < 2000:
-            response[-1] += mod + '\n'
+    for i in range(len(mods)):
+        if len(response[-1]) + len(mods[i]) + 1 < 1024:
+            response[-1] += f"{i+1}# {mods[i]}\n"
         else:
-            response.append(mod + '\n')
+            response.append(f"{i+1}# {mods[i]}\n")
     return response
 
 
-async def foreach_send(ctx: Context, response):
+def embed_res(embed: discord.Embed, response):
     for res in response:
-        if res and len(res) > 0:
-            await ctx.send(res)
+        embed.add_field(name=f"", value=res, inline=False)
 
 
 def get_diff():
@@ -82,47 +83,36 @@ def get_diff():
                 writer.writerow([mod])
 
 
-async def send_diff(ctx: Context, dif, command=True):
+async def send_diff(interaction: Interaction | TextChannel, dif, command=True):
     if dif is not None:
         removed = dif.get('removed')
         added = dif.get('added')
         if len(removed) > 0 or len(added):
-            if len(removed) > 0:
-                await ctx.send(f'Mods removidos:\n')
-                await foreach_send(ctx, mods_to_string(removed))
+            embeds = []
             if len(added) > 0:
-                await ctx.send(f'Mods adicionados:\n')
-                await foreach_send(ctx, mods_to_string(added))
+                embed_add = discord.Embed(
+                    title="Mods adicionados", color=discord.Color.green())
+                embed_res(embed_add, mods_to_string(added))
+                embeds.append(embed_add)
+            if len(removed) > 0:
+                embed_rem = discord.Embed(
+                    title="Mods removidos", color=discord.Color.red())
+                embed_res(embed_rem, mods_to_string(removed))
+                embeds.append(embed_rem)
+            if type(interaction) is Interaction:
+                await interaction.response.send_message(embeds=embeds)
+            else:
+                await interaction.send(embeds=embeds)
         else:
             if command:
-                await ctx.send("Não houve diferença desde a última execução do comando")
+                await interaction.response.send_message("Não houve diferença desde a última execução do comando")
     else:
         if command:
-            await ctx.send("Primeira execução do comando, não há comparativo")
+            await interaction.response.send_message("Primeira execução do comando, não há comparativo")
 
 
-@bot.command()
-async def mods(ctx: Context):
-    await foreach_send(ctx, mods_to_string(get_mods()))
-
-
-@bot.command()
-async def diff(ctx: Context):
-    await send_diff(ctx, get_diff())
-
-
-@tasks.loop(seconds=60)
-async def verificar_mods():
-    dif = get_diff()
-    for channel_id in channels_ids:
-        channel = bot.get_channel(channel_id)
-        await send_diff(channel, dif)
-
-bot.remove_command('help')
-
-
-@bot.command()
-async def help(ctx):
+@tree.command(name="help", description="Exibe a lista de comandos disponíveis.")
+async def help(interaction: Interaction):
     embed = discord.Embed(
         title="Comandos Bot None",  color=discord.Color.blue())
     embed.add_field(
@@ -135,30 +125,73 @@ async def help(ctx):
                     inline=False)
     embed.add_field(
         name="!help", value="Exibe a lista de comandos disponíveis.", inline=False)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command()
-async def add_channel(ctx: Context):
-    if ctx.channel.id not in channels_ids:
-        channels_ids.append(ctx.channel.id)
-        await ctx.send('Canal adicionado')
+@tree.command(name="mods", description="Lista os mods do servidor.")
+async def mods(interaction: Interaction):
+    mods = get_mods()
+    embed = discord.Embed(title="Mods", color=discord.Color.blue())
+    embed.add_field(name=f"Quantidade: {len(mods)}", value="", inline=False)
+    embed_res(embed, mods_to_string(mods))
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="diff", description="Exibe a diferença de mods desde a última execução do comando.")
+async def diff(interaction: Interaction):
+    await send_diff(interaction, get_diff())
+
+
+@tree.command(name="add_channel", description="Adiciona o canal atual para receber as notificações de diferença de mods.")
+async def add_channel(interaction: Interaction):
+    channel = client.get_channel(interaction.channel.id)
+    if channel is None:
+        await interaction.response.send_message('Canal inválido')
     else:
-        await ctx.send('Canal já adicionado')
+        if interaction.channel.id not in channels_ids:
+            channels_ids.append(interaction.channel.id)
+            with open(channels_csv, "a", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([interaction.channel.id])
+            await interaction.response.send_message('Canal adicionado')
+        else:
+            await interaction.response.send_message('Canal já adicionado')
 
 
-@bot.command()
-async def remove_channel(ctx: Context):
-    if ctx.channel.id in channels_ids:
-        channels_ids.remove(ctx.channel.id)
-        await ctx.send('Canal removido')
+@tree.command(name="remove_channel", description="Remove o canal atual para receber as notificações de diferença de mods.")
+async def remove_channel(interaction: Interaction):
+    if interaction.channel.id in channels_ids:
+        channels_ids.remove(interaction.channel.id)
+        # remove from csv
+        with open(channels_csv, "w", newline="") as file:
+            writer = csv.writer(file)
+            for channel_id in channels_ids:
+                writer.writerow([channel_id])
+        await interaction.response.send_message('Canal removido')
     else:
-        await ctx.send('Canal não adicionado')
+        await interaction.response.send_message('Canal não adicionado')
 
 
-@bot.event
+@tasks.loop(seconds=10)
+async def verificar_mods():
+    dif = get_diff()
+    for channel_id in channels_ids:
+        channel = client.get_channel(channel_id)
+        if channel is not None:
+            await send_diff(channel, dif, False)
+
+
+@client.event
 async def on_ready():
+    await tree.sync()
+    try:
+        with open(channels_csv, newline='') as file:
+            reader = csv.reader(file)
+            for row in reader:
+                channels_ids.append(int(row[0]))
+    except FileNotFoundError:
+        with open(channels_csv, "w", newline="") as file:
+            pass
     verificar_mods.start()
-    print(f'Bot conectado como {bot.user.name}')
 
-bot.run(DISCORD_TOKEN)
+client.run(DISCORD_TOKEN)
