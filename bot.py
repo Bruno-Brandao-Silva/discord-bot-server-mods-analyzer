@@ -1,5 +1,6 @@
 import os
 import csv
+import time
 import requests
 import discord
 from discord import app_commands, Interaction, TextChannel
@@ -12,6 +13,7 @@ API_TOKEN = os.getenv('API_TOKEN')
 API_URL = os.getenv('API_URL')
 API_SERVER_ID = os.getenv('API_SERVER_ID')
 
+link_mods = "https://drive.google.com/drive/folders/1V4LsGFEDsSyoVcu-Xa7WvYfhWHmXbUyA"
 mods_csv = "mods.csv"
 channels_csv = "channels.csv"
 channels_ids = []
@@ -23,6 +25,15 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+
+try:
+    with open(channels_csv, newline='') as file:
+        reader = csv.reader(file)
+        for row in reader:
+            channels_ids.append(int(row[0]))
+except FileNotFoundError:
+    with open(channels_csv, "w", newline="") as file:
+        pass
 
 
 def get_mods():
@@ -87,7 +98,7 @@ async def send_diff(interaction: Interaction | TextChannel, dif, command=True):
     if dif is not None:
         removed = dif.get('removed')
         added = dif.get('added')
-        if len(removed) > 0 or len(added):
+        if len(removed) > 0 or len(added) > 0:
             embeds = []
             if len(added) > 0:
                 embed_add = discord.Embed(
@@ -99,6 +110,11 @@ async def send_diff(interaction: Interaction | TextChannel, dif, command=True):
                     title="Mods removidos", color=discord.Color.red())
                 embed_res(embed_rem, mods_to_string(removed))
                 embeds.append(embed_rem)
+            embeds.append(discord.Embed(
+                title="Pasta mods atuliaza disponível em:",
+                description=link_mods,
+                color=discord.Color.blue()
+            ))
             if type(interaction) is Interaction:
                 await interaction.response.send_message(embeds=embeds)
             else:
@@ -116,15 +132,15 @@ async def help(interaction: Interaction):
     embed = discord.Embed(
         title="Comandos Bot None",  color=discord.Color.blue())
     embed.add_field(
-        name="!mods", value="Lista os mods do servidor.", inline=False)
-    embed.add_field(name="!diff", value="Exibe a diferença de mods desde a última execução do comando.",
+        name="/mods", value="Lista os mods do servidor.", inline=False)
+    embed.add_field(name="/diff", value="Exibe a diferença de mods desde a última execução do comando.",
                     inline=False)
-    embed.add_field(name="!add_channel", value="Adiciona o canal atual para receber as notificações de diferença de mods.",
+    embed.add_field(name="/add_channel", value="Adiciona o canal atual para receber as notificações de diferença de mods.",
                     inline=False)
-    embed.add_field(name="!remove_channel", value="Remove o canal atual para receber as notificações de diferença de mods.",
+    embed.add_field(name="/remove_channel", value="Remove o canal atual para receber as notificações de diferença de mods.",
                     inline=False)
     embed.add_field(
-        name="!help", value="Exibe a lista de comandos disponíveis.", inline=False)
+        name="/help", value="Exibe a lista de comandos disponíveis.", inline=False)
     await interaction.response.send_message(embed=embed)
 
 
@@ -134,7 +150,11 @@ async def mods(interaction: Interaction):
     embed = discord.Embed(title="Mods", color=discord.Color.blue())
     embed.add_field(name=f"Quantidade: {len(mods)}", value="", inline=False)
     embed_res(embed, mods_to_string(mods))
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embeds=[embed, discord.Embed(
+        title="Pasta mods atuliaza disponível em:",
+        description=link_mods,
+        color=discord.Color.blue()
+    )])
 
 
 @tree.command(name="diff", description="Exibe a diferença de mods desde a última execução do comando.")
@@ -171,27 +191,45 @@ async def remove_channel(interaction: Interaction):
     else:
         await interaction.response.send_message('Canal não adicionado')
 
+dif = None
+dif2 = None
+
 
 @tasks.loop(seconds=10)
-async def verificar_mods():
-    dif = get_diff()
-    for channel_id in channels_ids:
-        channel = client.get_channel(channel_id)
-        if channel is not None:
-            await send_diff(channel, dif, False)
+async def verficar_dif_continuos():
+    global dif
+    global dif2
+    if dif is None:
+        dif = get_diff()
+    elif len(dif.get('added')) > 0 or len(dif.get('removed')) > 0:
+        dif2 = get_diff()
+        if len(dif2.get('added')) > 0 or len(dif2.get('removed')) > 0:
+            dif['added'] = dif['added'] + dif2['added']
+            dif['removed'] = dif['removed'] + dif2['removed']
+            dif2 = None
+        else:
+            for channel_id in channels_ids:
+                channel = client.get_channel(channel_id)
+                if channel is not None:
+                    await send_diff(channel, dif, False)
+            dif = None
+            dif2 = None
+            verficar_dif_continuos.stop()
+    else:
+        dif = None
+        dif2 = None
+        verficar_dif_continuos.stop()
+
+
+@tasks.loop(seconds=60)
+async def verificar_dif():
+    if not verficar_dif_continuos.is_running():
+        verficar_dif_continuos.start()
 
 
 @client.event
 async def on_ready():
     await tree.sync()
-    try:
-        with open(channels_csv, newline='') as file:
-            reader = csv.reader(file)
-            for row in reader:
-                channels_ids.append(int(row[0]))
-    except FileNotFoundError:
-        with open(channels_csv, "w", newline="") as file:
-            pass
-    verificar_mods.start()
+    verificar_dif.start()
 
 client.run(DISCORD_TOKEN)
